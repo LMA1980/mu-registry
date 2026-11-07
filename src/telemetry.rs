@@ -17,7 +17,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use muobserve_ipc::{
+use mu_observable_ipc::{
     encode_log_batch, encode_span_batch, write_frame, DeterministicSecretRedactor, IpcHeader,
     OtelLogEntry, OtelSpanEntry, TraceContext, MSG_TYPE_ARROW_OTEL_LOGS, MSG_TYPE_ARROW_OTEL_SPANS,
 };

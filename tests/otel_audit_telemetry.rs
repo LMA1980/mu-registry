@@ -1,10 +1,10 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use muobserve_ipc::{
+use mu_observable_ipc::{
     decode_log_batch, decode_span_batch, read_frame, MSG_TYPE_ARROW_OTEL_LOGS,
     MSG_TYPE_ARROW_OTEL_SPANS,
 };
-use muregist::{
+use mu_registry::{
     api::build_app_router, auth::hash_token_sha256, encode_publish_frame, AppConfig, AppState,
     CasStore, DuckDbCatalog, MuObserveRegistrySink, RecordingRegistryTelemetrySink, TokenScope,
 };

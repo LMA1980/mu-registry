@@ -1,6 +1,6 @@
-name = "muregist"
-# Crate-embedded Symposium manifest for muregist.
+name = "mu-registry"
+# Crate-embedded Symposium manifest for mu-registry.
 
 [[plugins]]
-depends-on = ["muobserve-ipc"]
-source.cargo = "muobserve-ipc"
+depends-on = ["mu-observable-ipc"]
+source.cargo = "mu-observable-ipc"

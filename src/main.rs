@@ -1,4 +1,4 @@
-use muregist::{api::build_app_router, AppConfig, AppState, CasStore, DuckDbCatalog};
+use mu_registry::{api::build_app_router, AppConfig, AppState, CasStore, DuckDbCatalog};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting MuRegist Daemon...");
+    info!("Starting mu-registry Daemon...");
 
     let config = Arc::new(AppConfig::from_env());
     let cas = Arc::new(CasStore::new(&config.root_dir));
@@ -29,13 +29,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = build_app_router(state);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
-    info!("MuRegist listening on {}", config.listen_addr);
+    info!("mu-registry listening on {}", config.listen_addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    info!("MuRegist daemon stopped cleanly.");
+    info!("mu-registry daemon stopped cleanly.");
     Ok(())
 }
 
