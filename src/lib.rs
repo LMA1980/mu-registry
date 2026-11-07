@@ -1,4 +1,4 @@
-//! MuRegist - Pluggable Artifact & Package Registry
+//! mu-registry - Pluggable Artifact & Package Registry
 
 pub mod api;
 pub mod auth;

@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use muobserve_ipc::TraceContext;
+use mu_observable_ipc::TraceContext;
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;

@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
-use muregist::{
+use mu_registry::{
     api::build_app_router, auth::hash_token_sha256, AppConfig, AppState, CasStore, DuckDbCatalog,
     TokenScope,
 };

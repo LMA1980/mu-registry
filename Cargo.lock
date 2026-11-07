@@ -1235,6 +1235,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "mu-observable-ipc"
+version = "0.1.0"
+source = "git+https://github.com/LMA1980/mu-observable-ipc.git?branch=feat%2Fm8-naming-alignment#28793ce66732461cb68c3aef3006154939265abb"
+dependencies = [
+ "arrow",
+ "bytes",
+ "fory",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "zerocopy",
+]
+
+[[package]]
+name = "mu-registry"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "duckdb",
+ "futures-util",
+ "hex",
+ "http",
+ "http-body-util",
+ "mu-observable-ipc",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "x509-parser",
+]
+
+[[package]]
 name = "multer"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1256,53 +1303,6 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
-
-[[package]]
-name = "muobserve-ipc"
-version = "0.1.0"
-source = "git+https://github.com/LMA1980/MuObserve-ipc.git#72476e02a6dc873a7a9122a7f4f55cf91ac88836"
-dependencies = [
- "arrow",
- "bytes",
- "fory",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "zerocopy",
-]
-
-[[package]]
-name = "muregist"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-trait",
- "axum",
- "bytes",
- "chrono",
- "duckdb",
- "futures-util",
- "hex",
- "http",
- "http-body-util",
- "muobserve-ipc",
- "rcgen",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "x509-parser",
-]
 
 [[package]]
 name = "nom"

@@ -1,9 +1,9 @@
 ---
-name: muregist-cas-registry
-description: "Develop and interact with the MuRegist Content-Addressed Storage (CAS) artifact registry, DuckDB catalog, Cargo Sparse HTTP registry, and canary release APIs."
+name: mu-registry
+description: "Develop and interact with the mu-registry Content-Addressed Storage (CAS) artifact registry, DuckDB catalog, Cargo Sparse HTTP registry, and canary release APIs."
 ---
 
-# `muregist` Artifact & Package Registry Invariants
+# `mu-registry` Artifact & Package Registry Invariants
 
 ## 1. Content-Addressed Storage (CAS) & SHA-256 Verification
 
