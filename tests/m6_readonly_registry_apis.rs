@@ -332,19 +332,12 @@ async fn test_m6_canaries_w3c_trace_id_and_hostname_ip_sanitization() {
     assert_eq!(create_res.status(), StatusCode::CREATED);
 
     // Taint bundle with internal hostname, private LAN IP, and W3C trace_id
-    let internal_node = concat!("pey-", "wail-", "deu");
-    let internal_reason = concat!(
-        "SLO breach connecting to ",
-        "entr",
-        "ance.",
-        "lab",
-        ".",
-        "local (",
-        "192.168",
-        ".1.117:8444) and ",
-        "rubi",
-        "con (10.0.14.9) from /var/lib/muregist/canary"
+    std::env::set_var(
+        "MUREGISTRY_NODE_MAP",
+        "test-node-a=node-a,test-node-b=node-b,test-worker-rv=worker-riscv64",
     );
+    let internal_node = "test-worker-rv";
+    let internal_reason = "SLO breach connecting to test-node-a.corp.internal (192.168.100.50:8444) and test-node-b (10.0.14.9) from /var/lib/muregist/canary";
     let taint_payload = serde_json::json!({
         "service_name": "action-runner",
         "node_id": internal_node,
@@ -388,11 +381,11 @@ async fn test_m6_canaries_w3c_trace_id_and_hostname_ip_sanitization() {
     let canaries_json: serde_json::Value = serde_json::from_str(&canaries_str).unwrap();
 
     // Ensure zero internal hostnames, private LAN IPs, or host paths leak in response
-    assert!(!canaries_str.contains(concat!("entr", "ance")));
-    assert!(!canaries_str.contains(concat!("rubi", "con")));
-    assert!(!canaries_str.contains(concat!("pey-", "wail-", "deu")));
-    assert!(!canaries_str.contains(concat!("lab", ".", "local")));
-    assert!(!canaries_str.contains(concat!("192.168", ".")));
+    assert!(!canaries_str.contains("test-node-a"));
+    assert!(!canaries_str.contains("test-node-b"));
+    assert!(!canaries_str.contains("test-worker-rv"));
+    assert!(!canaries_str.contains("corp.internal"));
+    assert!(!canaries_str.contains("192.168.100.50"));
     assert!(!canaries_str.contains("10.0.14.9"));
     assert!(!canaries_str.contains("/var/lib/muregist"));
 
