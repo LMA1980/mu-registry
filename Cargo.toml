@@ -1,6 +1,6 @@
 [package]
 name = "mu-registry"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Pluggable artifact and package registry with Content-Addressed Storage (CAS), DuckDB metadata catalog, Cargo Sparse HTTP registry front-end, and Canary Release & Integration Test Bundle APIs"
 license = "AGPL-3.0-only"
@@ -12,7 +12,7 @@ bundled-duckdb = ["duckdb/bundled"]
 
 [dependencies]
 duckdb = { version = "=1.2.2", default-features = false }
-mu-observable-ipc = { git = "https://github.com/LMA1980/mu-observable-ipc.git", branch = "feat/m8-naming-alignment" }
+mu-observable-ipc = { git = "https://github.com/LMA1980/mu-observable-ipc.git", branch = "main" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "io-util", "process", "signal", "net"] }
 axum = { version = "0.8", features = ["multipart"] }

@@ -1237,7 +1237,7 @@ dependencies = [
 [[package]]
 name = "mu-observable-ipc"
 version = "0.1.0"
-source = "git+https://github.com/LMA1980/mu-observable-ipc.git?branch=feat%2Fm8-naming-alignment#28793ce66732461cb68c3aef3006154939265abb"
+source = "git+https://github.com/LMA1980/mu-observable-ipc.git?branch=main#8ae17bcca3ddbd3566e40f1b364afd487306f80c"
 dependencies = [
  "arrow",
  "bytes",
@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "mu-registry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "async-trait",
