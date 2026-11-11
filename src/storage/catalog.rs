@@ -102,30 +102,26 @@ fn replace_word_boundary(haystack: &str, needle: &str, replacement: &str) -> Str
 /// Scrubs internal lab hostnames, internal domains, RFC1918 private LAN IPs, and host
 /// filesystem paths from public read-only strings.
 pub fn sanitize_public_text(input: &str) -> String {
-    const HOST_A: &str = concat!("entr", "ance");
-    const HOST_B: &str = concat!("rubi", "con");
-    const HOST_RV: &str = concat!("pey-", "wail-", "deu");
-    const INTERNAL_DOMAIN: &str = concat!("lab", ".", "local");
-    const INTERNAL_SUFFIX: &str = concat!(".", "lab", ".", "local");
-
     let mut s = input.to_string();
-    s = s.replace(
-        concat!("entr", "ance.", "lab", ".", "local"),
-        "node-a.example.invalid",
-    );
-    s = s.replace(
-        concat!("rubi", "con.", "lab", ".", "local"),
-        "node-b.example.invalid",
-    );
-    s = s.replace(
-        concat!("pey-", "wail-", "deu.", "lab", ".", "local"),
-        "worker-riscv64.example.invalid",
-    );
-    s = replace_word_boundary(&s, HOST_RV, "worker-riscv64");
-    s = replace_word_boundary(&s, HOST_A, "node-a");
-    s = replace_word_boundary(&s, HOST_B, "node-b");
-    s = s.replace(INTERNAL_SUFFIX, ".example.invalid");
-    s = replace_word_boundary(&s, INTERNAL_DOMAIN, "example.invalid");
+    let mappings_res =
+        std::env::var("MUREGISTRY_NODE_MAP").or_else(|_| std::env::var("MUCONDE_NODE_MAP"));
+    if let Ok(mappings) = mappings_res {
+        for pair in mappings.split(',') {
+            if let Some((k, v)) = pair.split_once('=').or_else(|| pair.split_once(':')) {
+                let k_trim = k.trim();
+                let v_trim = v.trim();
+                if !k_trim.is_empty() && !v_trim.is_empty() {
+                    s = replace_word_boundary(&s, k_trim, v_trim);
+                }
+            }
+        }
+    }
+
+    for suffix in &[".corp.internal", ".internal", ".local", ".lan"] {
+        s = s.replace(suffix, ".example.invalid");
+    }
+    s = replace_word_boundary(&s, "corp.internal", "example.invalid");
+    s = replace_word_boundary(&s, "local", "example.invalid");
 
     // Scrub private IPv4 literals (192.168.x.y, 10.x.y.z, 172.16-31.x.y)
     let bytes = s.as_bytes();
@@ -1561,11 +1557,13 @@ mod tests {
             "Built in <redacted-path>, <redacted-path>, <redacted-path>, <redacted-path>, and <redacted-path>"
         );
 
+        std::env::set_var(
+            "MUREGISTRY_NODE_MAP",
+            "test-node-a=node-a,test-node-b=node-b,test-worker-rv=worker-riscv64",
+        );
         let raw_net = format!(
             "Node {} at {} on {}",
-            concat!("entr", "ance"),
-            concat!("192.168", ".10.25"),
-            concat!("service.", "lab", ".", "local")
+            "test-node-a", "192.168.10.25", "service.corp.internal"
         );
         let sanitized_net = sanitize_public_text(&raw_net);
         assert_eq!(
