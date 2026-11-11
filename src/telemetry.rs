@@ -228,6 +228,45 @@ pub fn classify_registry_operation(method: &str, path: &str) -> (String, Option<
         ("muregist.cargo.sparse_index".to_string(), None)
     } else if path.starts_with("/api/v1/crates/") && path.ends_with("/download") {
         ("muregist.cargo.download".to_string(), None)
+    } else if (path == "/api/v1/packages"
+        || path == "/api/v1/console/packages"
+        || path == "/api/packages")
+        && method == "GET"
+    {
+        ("muregist.packages.list".to_string(), None)
+    } else if path == "/api/v1/registry/crates" && method == "GET" {
+        ("muregist.crates.list".to_string(), None)
+    } else if (path.starts_with("/api/v1/registry/crates/") || path.starts_with("/api/crates/"))
+        && method == "GET"
+    {
+        ("muregist.crates.detail".to_string(), None)
+    } else if (path == "/api/v1/canaries" || path == "/api/v1/console/canaries") && method == "GET"
+    {
+        ("muregist.canaries.list".to_string(), None)
+    } else if path == "/api/v1/registry/bundles" && method == "GET" {
+        ("muregist.bundles.list".to_string(), None)
+    } else if path == "/api/v1/registry/taints" && method == "GET" {
+        ("muregist.taints.list".to_string(), None)
+    } else if (path == "/api/v1/cas/status"
+        || path == "/api/v1/console/cas"
+        || path == "/api/v1/cas/health"
+        || path == "/api/cas/status"
+        || path == "/api/cas/health")
+        && method == "GET"
+    {
+        ("muregist.cas.status".to_string(), None)
+    } else if (path == "/api/v1/registry/overview"
+        || path == "/api/overview"
+        || path == "/api/v1/overview")
+        && method == "GET"
+    {
+        ("muregist.overview".to_string(), None)
+    } else if (path == "/api/v1/registry/events"
+        || path == "/api/events"
+        || path == "/api/v1/events")
+        && method == "GET"
+    {
+        ("muregist.events.sse".to_string(), None)
     } else {
         (format!("muregist.http.{method}"), None)
     }
@@ -245,6 +284,32 @@ pub async fn registry_telemetry_middleware(
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
     let start_ns = now_unix_nano();
+
+    // Extract artifact_digest from headers, query, or path if present
+    let artifact_digest = req
+        .headers()
+        .get("x-artifact-digest")
+        .or_else(|| req.headers().get("x-payload-digest"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            req.uri().query().and_then(|q| {
+                for pair in q.split('&') {
+                    if let Some(d) = pair.strip_prefix("digest=") {
+                        return Some(d.to_string());
+                    }
+                }
+                None
+            })
+        })
+        .or_else(|| {
+            for seg in path.split('/') {
+                if seg.starts_with("sha256:") || seg.starts_with("sha256-") {
+                    return Some(seg.to_string());
+                }
+            }
+            None
+        });
 
     // Extract W3C traceparent header if valid, otherwise generate a root TraceContext
     let incoming_parent = req
@@ -280,12 +345,15 @@ pub async fn registry_telemetry_middleware(
     let (span_name, audit_action) = classify_registry_operation(&method, &path);
     let node_id = state.config.node_id.clone();
 
-    let attrs_json = serde_json::json!({
+    let mut attrs = serde_json::json!({
         "http.method": method,
         "http.route": path,
         "http.status_code": status_u16,
-    })
-    .to_string();
+    });
+    if let Some(ref digest) = artifact_digest {
+        attrs["artifact_digest"] = serde_json::Value::String(digest.clone());
+    }
+    let attrs_json = attrs.to_string();
 
     let span = OtelSpanEntry {
         trace_id: trace_ctx.trace_id_hex(),
