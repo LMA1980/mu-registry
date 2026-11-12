@@ -65,7 +65,7 @@ stages:
     name: "Verify Rust Linter & Clippy Rules (cargo clippy)"
     tasks: ["clippy-task"]
     depends_on: ["fmt-check"]
-    tags: ["clippy"]
+    tags: ["clippy", "x86_64"]
     threads: 4
     exclusive: false
     max_concurrent_per_node: 1
@@ -83,7 +83,7 @@ stages:
     name: "Build Workspace Targets (cargo build)"
     tasks: ["build-task"]
     depends_on: ["clippy-check"]
-    tags: ["build"]
+    tags: ["build", "x86_64"]
     threads: 6
     exclusive: false
     max_concurrent_per_node: 1
@@ -92,7 +92,7 @@ stages:
     name: "Execute Test Suite (cargo test)"
     tasks: ["test-task"]
     depends_on: ["build-check"]
-    tags: ["test"]
+    tags: ["test", "x86_64"]
     threads: 6
     exclusive: false
     max_concurrent_per_node: 1
@@ -101,7 +101,7 @@ stages:
     name: "Evaluate Line Code Coverage (cargo llvm-cov)"
     tasks: ["coverage-task"]
     depends_on: ["test-check", "audit-check"]
-    tags: ["test"]
+    tags: ["test", "x86_64"]
     threads: 6
     exclusive: false
     max_concurrent_per_node: 1
@@ -110,7 +110,7 @@ stages:
     name: "Verify Safe Execution & Undefined Behavior (cargo miri)"
     tasks: ["miri-task"]
     depends_on: ["test-check"]
-    tags: ["test"]
+    tags: ["test", "x86_64"]
     threads: 6
     exclusive: false
     max_concurrent_per_node: 1
