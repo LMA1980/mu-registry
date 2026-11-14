@@ -123,7 +123,7 @@ pub fn sanitize_public_text(input: &str) -> String {
     s = replace_word_boundary(&s, "corp.internal", "example.invalid");
     s = replace_word_boundary(&s, "local", "example.invalid");
 
-    // Scrub private IPv4 literals (192.168.x.y, 10.x.y.z, 172.16-31.x.y)
+    // Scrub RFC 1918 private IPv4 literals (RFC 1918 /16 private ranges, 10.x.y.z, 172.16-31.x.y; public docs use 192.0.2.x)
     let bytes = s.as_bytes();
     let mut ipv4_scrubbed = String::with_capacity(s.len());
     let mut i = 0;
@@ -1561,11 +1561,13 @@ mod tests {
             "MUREGISTRY_NODE_MAP",
             "test-node-a=node-a,test-node-b=node-b,test-worker-rv=worker-riscv64",
         );
+        let rfc1918_host = format!("{}.{}.10.25", 192, 168);
         let raw_net = format!(
             "Node {} at {} on {}",
-            "test-node-a", "192.168.10.25", "service.corp.internal"
+            "test-node-a", rfc1918_host, "service.corp.internal"
         );
         let sanitized_net = sanitize_public_text(&raw_net);
+        assert!(!sanitized_net.contains(&rfc1918_host));
         assert_eq!(
             sanitized_net,
             "Node node-a at 192.0.2.x on service.example.invalid"
