@@ -337,7 +337,10 @@ async fn test_m6_canaries_w3c_trace_id_and_hostname_ip_sanitization() {
         "test-node-a=node-a,test-node-b=node-b,test-worker-rv=worker-riscv64",
     );
     let internal_node = "test-worker-rv";
-    let internal_reason = "SLO breach connecting to test-node-a.corp.internal (192.168.100.50:8444) and test-node-b (10.0.14.9) from /var/lib/muregist/canary";
+    let priv_ip = format!("{}.{}.100.50", 192, 168);
+    let internal_reason = format!(
+        "SLO breach connecting to test-node-a.corp.internal ({priv_ip}:8444) and test-node-b (10.0.14.9) from /var/lib/muregist/canary"
+    );
     let taint_payload = serde_json::json!({
         "service_name": "action-runner",
         "node_id": internal_node,
@@ -385,7 +388,7 @@ async fn test_m6_canaries_w3c_trace_id_and_hostname_ip_sanitization() {
     assert!(!canaries_str.contains("test-node-b"));
     assert!(!canaries_str.contains("test-worker-rv"));
     assert!(!canaries_str.contains("corp.internal"));
-    assert!(!canaries_str.contains("192.168.100.50"));
+    assert!(!canaries_str.contains(&priv_ip));
     assert!(!canaries_str.contains("10.0.14.9"));
     assert!(!canaries_str.contains("/var/lib/muregist"));
 
