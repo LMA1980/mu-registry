@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use mu_registry::{
     api::build_app_router, auth::hash_token_sha256, encode_publish_frame, AppConfig, AppState,
-    CasStore, DuckDbCatalog, TokenScope,
+    CasStore, DuckDbCatalog, TokenScope, VerifiedClientSan,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -128,7 +128,23 @@ async fn test_auth_security_enforcement() {
         .unwrap();
     assert_eq!(c_taint_res.status(), StatusCode::OK);
 
-    // 6. Valid mTLS client cert SAN header grants access -> 200 OK
+    // 6. Spoofed x-client-cert-san header is rejected when MUREGIST_TRUST_PROXY_SAN_HEADER is disabled -> 401 Unauthorized
+    let spoof_taint_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/canary/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210/taint")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-client-cert-san", "node-a.example")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spoof_taint_res.status(), StatusCode::UNAUTHORIZED);
+
+    // 7. VerifiedClientSan request extension (attached by mTLS listener) grants access -> 200 OK
     let mtls_taint_res = app
         .clone()
         .oneshot(
@@ -136,11 +152,35 @@ async fn test_auth_security_enforcement() {
                 .uri("/api/v1/canary/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210/taint")
                 .method("POST")
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-client-cert-san", "registry.ci.ci.internal")
+                .extension(VerifiedClientSan("node-a.example".to_string()))
                 .body(Body::from("{}"))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(mtls_taint_res.status(), StatusCode::OK);
+
+    // 8. Trusted proxy header mode (opt-in) allows x-client-cert-san fallback -> 200 OK
+    let proxy_cfg = Arc::new(
+        AppConfig::new(tmp.path(), "https://registry.example:8444")
+            .with_trust_proxy_san_header(true),
+    );
+    let proxy_app = build_app_router(AppState {
+        config: proxy_cfg,
+        cas,
+        catalog,
+    });
+    let proxy_taint_res = proxy_app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/canary/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210/taint")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-client-cert-san", "node-a.example")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(proxy_taint_res.status(), StatusCode::OK);
 }

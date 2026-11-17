@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub tls_key_path: PathBuf,
     pub listen_addr: String,
     pub node_id: String,
+    pub require_tls: bool,
+    pub trust_proxy_san_header: bool,
     pub telemetry_sink: Arc<dyn RegistryTelemetrySink>,
 }
 
@@ -25,9 +27,18 @@ impl Default for AppConfig {
             tls_key_path: PathBuf::from("/etc/muregist/tls/server.key"),
             listen_addr: "0.0.0.0:8444".to_string(),
             node_id: "node-a".to_string(),
+            require_tls: false,
+            trust_proxy_san_header: false,
             telemetry_sink: Arc::new(MuObserveRegistrySink::from_env()),
         }
     }
+}
+
+/// Parses a boolean environment flag (`1`, `true`, `yes`, case-insensitive).
+pub(crate) fn parse_env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 impl AppConfig {
@@ -51,6 +62,34 @@ impl AppConfig {
     #[must_use]
     pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
         self.node_id = node_id.into();
+        self
+    }
+
+    /// Overrides the TLS CA, server certificate, and server private key paths.
+    #[must_use]
+    pub fn with_tls_paths(
+        mut self,
+        ca_path: impl Into<PathBuf>,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.tls_ca_path = ca_path.into();
+        self.tls_cert_path = cert_path.into();
+        self.tls_key_path = key_path.into();
+        self
+    }
+
+    /// Configures whether missing TLS artifacts must fail startup instead of falling back to plain TCP.
+    #[must_use]
+    pub fn with_require_tls(mut self, require_tls: bool) -> Self {
+        self.require_tls = require_tls;
+        self
+    }
+
+    /// Configures whether the `x-client-cert-san` proxy header fallback is trusted.
+    #[must_use]
+    pub fn with_trust_proxy_san_header(mut self, trust_proxy_san_header: bool) -> Self {
+        self.trust_proxy_san_header = trust_proxy_san_header;
         self
     }
 
@@ -90,6 +129,8 @@ impl AppConfig {
         if let Ok(val) = std::env::var("MUREGIST_LISTEN_ADDR") {
             cfg.listen_addr = val;
         }
+        cfg.require_tls = parse_env_bool("MUREGIST_REQUIRE_TLS");
+        cfg.trust_proxy_san_header = parse_env_bool("MUREGIST_TRUST_PROXY_SAN_HEADER");
         cfg
     }
 }

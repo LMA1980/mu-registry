@@ -1,6 +1,6 @@
 use crate::auth::AuthContext;
 use crate::config::AppConfig;
-use crate::storage::cas::CasStore;
+use crate::storage::cas::{CasStore, Sha256Digest, StorageError};
 use crate::storage::catalog::{
     validate_w3c_trace_id, CanaryBundleRecord, DuckDbCatalog, TokenScope,
 };
@@ -75,6 +75,11 @@ pub fn canary_router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/bundles/it", post(create_bundle_handler))
         .route("/api/v1/bundles/it/{id}", get(get_bundle_handler))
+        .route(
+            "/api/v1/cas/blobs/sha256/{digest}",
+            get(get_cas_blob_handler),
+        )
+        .route("/api/v1/blobs/sha256/{digest}", get(get_cas_blob_handler))
         .route(
             "/api/v1/canary/{digest}/promote",
             post(promote_canary_handler),
@@ -400,6 +405,65 @@ async fn get_bundle_handler(
             }
         }
         _ => (StatusCode::OK, Json(bundle)).into_response(),
+    }
+}
+
+async fn get_cas_blob_handler(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(digest): Path<String>,
+) -> Response {
+    if let Err(err) = auth.require_scope(TokenScope::Read) {
+        return err.into_response();
+    }
+
+    let valid_digest = match Sha256Digest::new(&digest) {
+        Ok(parsed) if parsed.as_str() == digest => parsed,
+        Ok(_) | Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_digest",
+                    "message": "Digest must be a 64-character lowercase hexadecimal SHA-256 string"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.cas.get_blob(valid_digest.as_str()).await {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            (StatusCode::OK, headers, bytes).into_response()
+        }
+        Err(StorageError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "blob_not_found",
+                "digest": valid_digest.as_str()
+            })),
+        )
+            .into_response(),
+        Err(StorageError::InvalidDigest(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_digest",
+                "message": "Digest must be a 64-character lowercase hexadecimal SHA-256 string"
+            })),
+        )
+            .into_response(),
+        Err(StorageError::CorruptBlob(_) | StorageError::Io(_) | StorageError::Conflict(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "cas_storage_error",
+                "digest": valid_digest.as_str()
+            })),
+        )
+            .into_response(),
     }
 }
 
