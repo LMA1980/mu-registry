@@ -122,12 +122,23 @@ pub fn extract_cert_sans(cert_der: &[u8]) -> Result<Vec<String>, AuthError> {
     Ok(sans)
 }
 
+/// Extracts the first non-empty SAN entry from a DER-encoded X.509 certificate.
+pub fn extract_primary_cert_san(cert_der: &[u8]) -> Result<Option<String>, AuthError> {
+    let sans = extract_cert_sans(cert_der)?;
+    Ok(sans
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty()))
+}
+
 /// Build rustls::ServerConfig requiring or verifying mTLS client certificates rooted in step-ca CA bundle.
 pub fn build_tls_server_config(
     ca_cert_path: impl AsRef<Path>,
     server_cert_path: impl AsRef<Path>,
     server_key_path: impl AsRef<Path>,
 ) -> Result<rustls::ServerConfig, AuthError> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let ca_file = File::open(ca_cert_path)?;
     let mut ca_reader = BufReader::new(ca_file);
     let ca_certs: Vec<CertificateDer<'static>> =
@@ -159,10 +170,11 @@ pub fn build_tls_server_config(
         rustls_pki_types::PrivateKeyDer::from_pem_reader(&mut key_reader)
             .map_err(|e| AuthError::Tls(format!("Failed to parse server private key: {e}")))?;
 
-    let config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(srv_certs, key)
         .map_err(|e| AuthError::Tls(format!("Failed to configure server cert: {e}")))?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(config)
 }
@@ -211,31 +223,84 @@ impl AuthContext {
     }
 }
 
+/// Verified peer certificate SAN attached to request extensions by the mTLS listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedClientSan(pub String);
+
+/// Request extension injected by router middleware when `AppConfig::trust_proxy_san_header` is true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrustProxySanHeader(pub bool);
+
+/// Returns whether the `x-client-cert-san` proxy header fallback is enabled via environment.
+#[must_use]
+pub fn trust_proxy_san_header_from_env() -> bool {
+    crate::config::parse_env_bool("MUREGIST_TRUST_PROXY_SAN_HEADER")
+}
+
+fn cert_san_auth_context(san: &str) -> AuthContext {
+    let mut scopes = HashSet::new();
+    scopes.insert(TokenScope::Publish);
+    scopes.insert(TokenScope::Yank);
+    scopes.insert(TokenScope::Read);
+    scopes.insert(TokenScope::CanaryManage);
+
+    AuthContext {
+        identity: ClientIdentity::CertSan(san.to_string()),
+        scopes,
+    }
+}
+
+fn authenticate_cert_san_from_parts(
+    parts: &Parts,
+    trust_proxy_san_header: bool,
+) -> Option<AuthContext> {
+    if let Some(VerifiedClientSan(san)) = parts.extensions.get::<VerifiedClientSan>() {
+        let san = san.trim();
+        if !san.is_empty() {
+            return Some(cert_san_auth_context(san));
+        }
+    }
+
+    if trust_proxy_san_header {
+        if let Some(san_val) = parts.headers.get("x-client-cert-san") {
+            if let Ok(san_str) = san_val.to_str() {
+                let san = san_str.trim();
+                if !san.is_empty() {
+                    return Some(cert_san_auth_context(san));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Authenticate incoming request using:
-/// 1. Client certificate SAN header (e.g. `X-Client-Cert-SAN` or TLS context) -> grants full administrative scopes.
-/// 2. `Authorization: Bearer <token>` verified against SHA-256 or Argon2id hashes in DuckDbCatalog.
+/// 1. Verified mTLS peer certificate SAN extension (`VerifiedClientSan`) -> grants full administrative scopes.
+/// 2. `x-client-cert-san` header fallback ONLY when explicitly enabled (`MUREGIST_TRUST_PROXY_SAN_HEADER=true`).
+/// 3. `Authorization: Bearer <token>` verified against SHA-256 or Argon2id hashes in DuckDbCatalog.
 pub fn authenticate_request(
     parts: &Parts,
     catalog: &DuckDbCatalog,
 ) -> Result<AuthContext, AuthError> {
-    // 1. Check for verified client certificate SAN
-    if let Some(san_val) = parts.headers.get("x-client-cert-san") {
-        if let Ok(san_str) = san_val.to_str() {
-            let san = san_str.trim();
-            if !san.is_empty() {
-                // Verified mTLS SAN granted all scopes (publish, yank, read, canary:manage)
-                let mut scopes = HashSet::new();
-                scopes.insert(TokenScope::Publish);
-                scopes.insert(TokenScope::Yank);
-                scopes.insert(TokenScope::Read);
-                scopes.insert(TokenScope::CanaryManage);
+    let trust_proxy_header = parts
+        .extensions
+        .get::<TrustProxySanHeader>()
+        .is_some_and(|flag| flag.0)
+        || trust_proxy_san_header_from_env();
+    authenticate_request_with_proxy_trust(parts, catalog, trust_proxy_header)
+}
 
-                return Ok(AuthContext {
-                    identity: ClientIdentity::CertSan(san.to_string()),
-                    scopes,
-                });
-            }
-        }
+/// Authenticate incoming request with an explicit setting for whether the `x-client-cert-san`
+/// reverse-proxy header fallback is trusted.
+pub fn authenticate_request_with_proxy_trust(
+    parts: &Parts,
+    catalog: &DuckDbCatalog,
+    trust_proxy_san_header: bool,
+) -> Result<AuthContext, AuthError> {
+    // 1 & 2. Check verified mTLS peer SAN extension first, then optional trusted-proxy header
+    if let Some(ctx) = authenticate_cert_san_from_parts(parts, trust_proxy_san_header) {
+        return Ok(ctx);
     }
 
     // 2. Check for Bearer token
@@ -424,6 +489,44 @@ mod tests {
     }
 
     #[test]
+    fn test_pure_rust_verified_client_san_and_spoofed_header_guard() {
+        // Spoofed x-client-cert-san header must be ignored when proxy trust is disabled
+        let spoof_req = axum::http::Request::builder()
+            .header("x-client-cert-san", "spoofed.node-a.example")
+            .body(())
+            .unwrap();
+        let (spoof_parts, _) = spoof_req.into_parts();
+        assert!(authenticate_cert_san_from_parts(&spoof_parts, false).is_none());
+
+        // Proxy trust enabled falls back to x-client-cert-san header
+        let trusted_proxy_auth =
+            authenticate_cert_san_from_parts(&spoof_parts, true).expect("proxy fallback auth");
+        assert_eq!(
+            trusted_proxy_auth.identity,
+            ClientIdentity::CertSan("spoofed.node-a.example".to_string())
+        );
+        assert!(trusted_proxy_auth.has_scope(TokenScope::Read));
+        assert!(trusted_proxy_auth.has_scope(TokenScope::Publish));
+
+        // VerifiedClientSan extension always takes precedence over any header
+        let ext_req = axum::http::Request::builder()
+            .header("x-client-cert-san", "spoofed.node-a.example")
+            .extension(VerifiedClientSan("verified.node-a.example".to_string()))
+            .body(())
+            .unwrap();
+        let (ext_parts, _) = ext_req.into_parts();
+        let ext_auth = authenticate_cert_san_from_parts(&ext_parts, true).expect("ext auth");
+        assert_eq!(
+            ext_auth.identity,
+            ClientIdentity::CertSan("verified.node-a.example".to_string())
+        );
+        assert!(ext_auth.has_scope(TokenScope::Publish));
+        assert!(ext_auth.has_scope(TokenScope::Yank));
+        assert!(ext_auth.has_scope(TokenScope::Read));
+        assert!(ext_auth.has_scope(TokenScope::CanaryManage));
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn test_cert_san_extraction_and_auth() {
         let mut params = CertificateParams::default();
@@ -445,20 +548,47 @@ mod tests {
         let sans = extract_cert_sans(der).unwrap();
         assert_eq!(sans.len(), 2);
         assert!(sans.contains(&"registry.ci.ci.internal".to_string()));
+        assert_eq!(
+            extract_primary_cert_san(der).unwrap().as_deref(),
+            Some("registry.ci.ci.internal")
+        );
 
         let catalog = DuckDbCatalog::in_memory().unwrap();
-        let req = axum::http::Request::builder()
+
+        // Spoofed header without VerifiedClientSan and with proxy trust disabled -> Anonymous
+        let spoof_req = axum::http::Request::builder()
             .header("x-client-cert-san", "registry.ci.ci.internal")
             .body(())
             .unwrap();
-        let (parts, _) = req.into_parts();
+        let (spoof_parts, _) = spoof_req.into_parts();
+        let spoof_auth = authenticate_request(&spoof_parts, &catalog).unwrap();
+        assert!(!spoof_auth.is_authenticated());
 
-        let auth = authenticate_request(&parts, &catalog).unwrap();
-        assert!(auth.is_authenticated());
-        assert!(auth.has_scope(TokenScope::Publish));
-        assert!(auth.has_scope(TokenScope::Yank));
-        assert!(auth.has_scope(TokenScope::Read));
-        assert!(auth.has_scope(TokenScope::CanaryManage));
+        // VerifiedClientSan request extension grants full administrative scopes
+        let verified_req = axum::http::Request::builder()
+            .extension(VerifiedClientSan("registry.ci.ci.internal".to_string()))
+            .body(())
+            .unwrap();
+        let (verified_parts, _) = verified_req.into_parts();
+        let verified_auth = authenticate_request(&verified_parts, &catalog).unwrap();
+        assert!(verified_auth.is_authenticated());
+        assert_eq!(
+            verified_auth.identity,
+            ClientIdentity::CertSan("registry.ci.ci.internal".to_string())
+        );
+        assert!(verified_auth.has_scope(TokenScope::Publish));
+        assert!(verified_auth.has_scope(TokenScope::Yank));
+        assert!(verified_auth.has_scope(TokenScope::Read));
+        assert!(verified_auth.has_scope(TokenScope::CanaryManage));
+
+        // Explicit proxy header trust fallback works when enabled
+        let proxy_auth =
+            authenticate_request_with_proxy_trust(&spoof_parts, &catalog, true).unwrap();
+        assert!(proxy_auth.is_authenticated());
+        assert_eq!(
+            proxy_auth.identity,
+            ClientIdentity::CertSan("registry.ci.ci.internal".to_string())
+        );
     }
 
     #[test]

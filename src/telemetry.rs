@@ -211,6 +211,11 @@ pub fn classify_registry_operation(method: &str, path: &str) -> (String, Option<
         )
     } else if path.starts_with("/api/v1/bundles/it/") && method == "GET" {
         ("muregist.canary.bundle.get".to_string(), None)
+    } else if (path.starts_with("/api/v1/cas/blobs/sha256/")
+        || path.starts_with("/api/v1/blobs/sha256/"))
+        && method == "GET"
+    {
+        ("muregist.cas.blob.get".to_string(), None)
     } else if path.starts_with("/api/v1/canary/") && path.ends_with("/promote") && method == "POST"
     {
         (
@@ -278,9 +283,13 @@ static REQUEST_SEED_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// [`OtelSpanEntry`] and [`OtelLogEntry`] audit records to `MuObserve`.
 pub async fn registry_telemetry_middleware(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
+    if state.config.trust_proxy_san_header {
+        req.extensions_mut()
+            .insert(crate::auth::TrustProxySanHeader(true));
+    }
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
     let start_ns = now_unix_nano();
