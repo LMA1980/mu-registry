@@ -143,7 +143,7 @@ impl CasStore {
     }
 
     pub fn default_path() -> PathBuf {
-        PathBuf::from("/var/lib/muregist")
+        crate::config::default_root_dir()
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -344,10 +344,19 @@ mod tests {
         )
         .is_err());
 
-        let store = CasStore::new("/var/lib/muregist");
+        let store = CasStore::new("/var/lib/mu-registry");
         let blob_path = store.blob_path(valid_hex).unwrap();
         assert!(blob_path.ends_with(format!("blobs/sha256/e3/{valid_hex}")));
         assert!(store.blob_path("invalid").is_err());
+
+        if !Path::new(crate::config::LEGACY_REGISTRY_ROOT_DIR).exists()
+            || Path::new(crate::config::DEFAULT_REGISTRY_ROOT_DIR).exists()
+        {
+            assert_eq!(
+                CasStore::default_path(),
+                PathBuf::from(crate::config::DEFAULT_REGISTRY_ROOT_DIR)
+            );
+        }
     }
 
     #[tokio::test]

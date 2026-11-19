@@ -25,9 +25,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use crate::api::canary::AppState;
+use crate::config::env_var_first_with;
 
-/// Canonical service name emitted on `MuRegist` spans and audit logs.
-pub const REGISTRY_SERVICE_NAME: &str = "muregist";
+/// Canonical service name emitted on `mu-registry` spans and audit logs.
+pub const REGISTRY_SERVICE_NAME: &str = "mu-registry";
 
 /// Current timestamp in nanoseconds since Unix epoch.
 #[must_use]
@@ -72,11 +73,31 @@ impl MuObserveRegistrySink {
 
     #[must_use]
     pub fn from_env() -> Self {
-        let addr = std::env::var("MUOBSERVE_COLLECTOR_ADDR")
-            .or_else(|_| std::env::var("MUOBSERVE_ADDR"))
-            .ok();
-        let node_id = std::env::var("MUREGIST_NODE_ID").unwrap_or_else(|_| "node-a".to_string());
+        Self::from_env_with(|k| std::env::var(k).ok())
+    }
+
+    #[must_use]
+    pub fn from_env_with<F>(mut lookup: F) -> Self
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let addr = env_var_first_with(
+            &[
+                "MU_OBSERVABLE_COLLECTOR_ADDR",
+                "MU_OBSERVABLE_ADDR",
+                "MUOBSERVE_COLLECTOR_ADDR",
+                "MUOBSERVE_ADDR",
+            ],
+            &mut lookup,
+        );
+        let node_id = env_var_first_with(&["MU_REGISTRY_NODE_ID", "MUREGIST_NODE_ID"], &mut lookup)
+            .unwrap_or_else(|| "node-a".to_string());
         Self::new(addr, node_id)
+    }
+
+    #[must_use]
+    pub fn collector_addr(&self) -> Option<&str> {
+        self.collector_addr.as_deref()
     }
 
     #[must_use]
@@ -412,4 +433,59 @@ pub async fn registry_telemetry_middleware(
     }
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_registry_service_name_and_env_precedence() {
+        assert_eq!(REGISTRY_SERVICE_NAME, "mu-registry");
+
+        // Legacy fallback only
+        let legacy: HashMap<&str, &str> = HashMap::from([
+            ("MUOBSERVE_ADDR", "127.0.0.1:4319"),
+            ("MUREGIST_NODE_ID", "legacy-node"),
+        ]);
+        let sink_legacy =
+            MuObserveRegistrySink::from_env_with(|k| legacy.get(k).map(|v| (*v).to_string()));
+        assert_eq!(sink_legacy.collector_addr(), Some("127.0.0.1:4319"));
+        assert_eq!(sink_legacy.node_id(), "legacy-node");
+
+        // MUOBSERVE_COLLECTOR_ADDR beats MUOBSERVE_ADDR when canonical unset
+        let legacy_specific: HashMap<&str, &str> = HashMap::from([
+            ("MUOBSERVE_COLLECTOR_ADDR", "127.0.0.1:14319"),
+            ("MUOBSERVE_ADDR", "127.0.0.1:4319"),
+        ]);
+        let sink_legacy_spec = MuObserveRegistrySink::from_env_with(|k| {
+            legacy_specific.get(k).map(|v| (*v).to_string())
+        });
+        assert_eq!(sink_legacy_spec.collector_addr(), Some("127.0.0.1:14319"));
+
+        // MU_OBSERVABLE_ADDR beats both legacy MUOBSERVE_* vars
+        let canon_short: HashMap<&str, &str> = HashMap::from([
+            ("MU_OBSERVABLE_ADDR", "127.0.0.1:24319"),
+            ("MUOBSERVE_COLLECTOR_ADDR", "127.0.0.1:14319"),
+            ("MUOBSERVE_ADDR", "127.0.0.1:4319"),
+            ("MU_REGISTRY_NODE_ID", "node-b"),
+            ("MUREGIST_NODE_ID", "legacy-node"),
+        ]);
+        let sink_canon_short =
+            MuObserveRegistrySink::from_env_with(|k| canon_short.get(k).map(|v| (*v).to_string()));
+        assert_eq!(sink_canon_short.collector_addr(), Some("127.0.0.1:24319"));
+        assert_eq!(sink_canon_short.node_id(), "node-b");
+
+        // MU_OBSERVABLE_COLLECTOR_ADDR beats MU_OBSERVABLE_ADDR and all legacy vars
+        let canon_specific: HashMap<&str, &str> = HashMap::from([
+            ("MU_OBSERVABLE_COLLECTOR_ADDR", "127.0.0.1:34319"),
+            ("MU_OBSERVABLE_ADDR", "127.0.0.1:24319"),
+            ("MUOBSERVE_COLLECTOR_ADDR", "127.0.0.1:14319"),
+        ]);
+        let sink_canon_spec = MuObserveRegistrySink::from_env_with(|k| {
+            canon_specific.get(k).map(|v| (*v).to_string())
+        });
+        assert_eq!(sink_canon_spec.collector_addr(), Some("127.0.0.1:34319"));
+    }
 }

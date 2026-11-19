@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 /// Serves `app` over `listener` using mTLS when TLS artifacts exist, or plain TCP fallback
-/// when absent and `MUREGIST_REQUIRE_TLS` is not enabled.
+/// when absent and `MU_REGISTRY_REQUIRE_TLS` is not enabled.
 async fn serve_with_config<F>(
     listener: TcpListener,
     app: Router,

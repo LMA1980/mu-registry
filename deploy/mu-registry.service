@@ -1,0 +1,30 @@
+[Unit]
+Description=MuRegistry Artifact & Package Registry Daemon
+Documentation=https://github.com/LMA1980/mu-registry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mu-registry
+Group=mu-registry
+WorkingDirectory=/var/lib/mu-registry
+EnvironmentFile=/etc/mu-registry/registry.env
+ExecStart=/usr/local/bin/mu-registry
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+ReadWritePaths=/var/lib/mu-registry
+ReadOnlyPaths=/etc/mu-registry
+InaccessiblePaths=/etc/shadow /root
+
+[Install]
+WantedBy=multi-user.target

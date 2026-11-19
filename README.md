@@ -42,10 +42,10 @@ ______________________________________________________________________
 
 ## Storage & Catalog Layout
 
-Default storage root `/var/lib/muregist` (override via `MUREGIST_ROOT_DIR`):
+Default storage root `/var/lib/mu-registry` (override via `MU_REGISTRY_ROOT_DIR`, with legacy fallback to `/var/lib/muregist` and `MUREGIST_ROOT_DIR` when upgrading existing deployments):
 
 ```text
-/var/lib/muregist/
+/var/lib/mu-registry/
 ├── blobs/
 │   └── sha256/
 │       ├── 0a/
@@ -58,6 +58,8 @@ Default storage root `/var/lib/muregist` (override via `MUREGIST_ROOT_DIR`):
 │   └── ... (atomic index staging files)
 └── catalog.duckdb (DuckDB metadata, releases, tokens, canary state)
 ```
+
+Systemd deployment templates (`deploy/mu-registry.service` and `deploy/mu-registry.env.example`) configure the `mu-registry` service user, `/etc/mu-registry/registry.env`, and `/var/lib/mu-registry`.
 
 ______________________________________________________________________
 
