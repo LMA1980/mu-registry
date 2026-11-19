@@ -234,7 +234,10 @@ pub(crate) struct TrustProxySanHeader(pub bool);
 /// Returns whether the `x-client-cert-san` proxy header fallback is enabled via environment.
 #[must_use]
 pub fn trust_proxy_san_header_from_env() -> bool {
-    crate::config::parse_env_bool("MUREGIST_TRUST_PROXY_SAN_HEADER")
+    crate::config::parse_env_bool_first(&[
+        "MU_REGISTRY_TRUST_PROXY_SAN_HEADER",
+        "MUREGIST_TRUST_PROXY_SAN_HEADER",
+    ])
 }
 
 fn cert_san_auth_context(san: &str) -> AuthContext {
@@ -277,7 +280,7 @@ fn authenticate_cert_san_from_parts(
 
 /// Authenticate incoming request using:
 /// 1. Verified mTLS peer certificate SAN extension (`VerifiedClientSan`) -> grants full administrative scopes.
-/// 2. `x-client-cert-san` header fallback ONLY when explicitly enabled (`MUREGIST_TRUST_PROXY_SAN_HEADER=true`).
+/// 2. `x-client-cert-san` header fallback ONLY when explicitly enabled (`MU_REGISTRY_TRUST_PROXY_SAN_HEADER=true`).
 /// 3. `Authorization: Bearer <token>` verified against SHA-256 or Argon2id hashes in DuckDbCatalog.
 pub fn authenticate_request(
     parts: &Parts,

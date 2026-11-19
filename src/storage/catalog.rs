@@ -103,9 +103,12 @@ fn replace_word_boundary(haystack: &str, needle: &str, replacement: &str) -> Str
 /// filesystem paths from public read-only strings.
 pub fn sanitize_public_text(input: &str) -> String {
     let mut s = input.to_string();
-    let mappings_res =
-        std::env::var("MUREGISTRY_NODE_MAP").or_else(|_| std::env::var("MUCONDE_NODE_MAP"));
-    if let Ok(mappings) = mappings_res {
+    let mappings_opt = crate::config::env_var_first(&[
+        "MU_REGISTRY_NODE_MAP",
+        "MUREGISTRY_NODE_MAP",
+        "MUCONDE_NODE_MAP",
+    ]);
+    if let Some(mappings) = mappings_opt {
         for pair in mappings.split(',') {
             if let Some((k, v)) = pair.split_once('=').or_else(|| pair.split_once(':')) {
                 let k_trim = k.trim();

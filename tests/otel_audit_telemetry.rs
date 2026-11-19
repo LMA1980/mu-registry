@@ -207,12 +207,16 @@ async fn test_otel_audit_spans_and_logs_across_publish_yank_bundle_and_canary_wh
     assert!(span_names.contains(&"muregist.canary.taint"));
 
     for span in &spans {
+        assert_eq!(span.service_name, "mu-registry");
         assert_eq!(span.trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(span.parent_span_id.as_deref(), Some("00f067aa0ba902b7"));
     }
 
     let logs = recorder.recorded_logs().await;
     assert_eq!(logs.len(), 5);
+    for log in &logs {
+        assert_eq!(log.service_name, "mu-registry");
+    }
     let log_bodies: Vec<&str> = logs.iter().map(|l| l.body.as_str()).collect();
     assert!(log_bodies.iter().any(|b| b.contains("cargo.crate.publish")));
     assert!(log_bodies.iter().any(|b| b.contains("cargo.crate.yank")));

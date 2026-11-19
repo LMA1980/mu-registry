@@ -1,7 +1,7 @@
 use crate::auth::{
     build_tls_server_config, extract_primary_cert_san, AuthError, VerifiedClientSan,
 };
-use crate::config::{parse_env_bool, AppConfig};
+use crate::config::{parse_env_bool_first, AppConfig};
 use axum::Router;
 use hyper::body::{Body as HttpBody, Incoming};
 use hyper::service::Service as HyperService;
@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 /// Builds a [`TlsAcceptor`] when CA, server certificate, and server key files all exist.
 ///
 /// If any TLS artifact is absent and `require_tls` (via [`AppConfig::require_tls`] or
-/// `MUREGIST_REQUIRE_TLS=true`) is false, logs a warning and returns `Ok(None)` so local
+/// `MU_REGISTRY_REQUIRE_TLS=true` / `MUREGIST_REQUIRE_TLS=true`) is false, logs a warning and returns `Ok(None)` so local
 /// development can fall back to plain TCP. Fails closed with [`AuthError::Tls`] when TLS
 /// is required but artifacts are missing.
 pub fn build_listener_tls_acceptor(config: &AppConfig) -> Result<Option<TlsAcceptor>, AuthError> {
@@ -41,10 +41,11 @@ pub fn build_listener_tls_acceptor(config: &AppConfig) -> Result<Option<TlsAccep
         return Ok(Some(TlsAcceptor::from(Arc::new(server_config))));
     }
 
-    let require_tls = config.require_tls || parse_env_bool("MUREGIST_REQUIRE_TLS");
+    let require_tls = config.require_tls
+        || parse_env_bool_first(&["MU_REGISTRY_REQUIRE_TLS", "MUREGIST_REQUIRE_TLS"]);
     if require_tls {
         return Err(AuthError::Tls(format!(
-            "TLS is required (MUREGIST_REQUIRE_TLS=true), but required TLS files are missing (ca={}, cert={}, key={})",
+            "TLS is required (MU_REGISTRY_REQUIRE_TLS=true), but required TLS files are missing (ca={}, cert={}, key={})",
             config.tls_ca_path.display(),
             config.tls_cert_path.display(),
             config.tls_key_path.display(),
@@ -55,7 +56,7 @@ pub fn build_listener_tls_acceptor(config: &AppConfig) -> Result<Option<TlsAccep
         ca_path = %config.tls_ca_path.display(),
         cert_path = %config.tls_cert_path.display(),
         key_path = %config.tls_key_path.display(),
-        "TLS certificate artifacts absent and MUREGIST_REQUIRE_TLS is not enabled; falling back to plain TCP listener for local development"
+        "TLS certificate artifacts absent and MU_REGISTRY_REQUIRE_TLS is not enabled; falling back to plain TCP listener for local development"
     );
     Ok(None)
 }
