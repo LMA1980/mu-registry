@@ -52,6 +52,9 @@ pub fn build_app_router(state: AppState) -> Router {
 
 pub fn readonly_registry_router() -> Router<AppState> {
     Router::new()
+        .route("/health", get(registry_health_handler))
+        .route("/api/health", get(registry_health_handler))
+        .route("/api/v1/cas/health", get(registry_health_handler))
         .route("/api/v1/packages", get(list_public_packages_handler))
         .route(
             "/api/v1/console/packages",
@@ -274,6 +277,43 @@ async fn list_registry_taints_handler(State(state): State<AppState>) -> Response
             StatusCode::INTERNAL_SERVER_ERROR,
             no_store_headers(),
             Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn registry_health_handler(State(state): State<AppState>) -> Response {
+    match state.cas.storage_health_summary().await {
+        Ok(summary) => {
+            let status_code = if summary.healthy {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            let status_label = if summary.healthy { "ok" } else { "degraded" };
+            (
+                status_code,
+                no_store_headers(),
+                Json(serde_json::json!({
+                    "status": status_label,
+                    "service": "mu-registry",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "healthy": summary.healthy,
+                    "total_blobs": summary.total_blobs,
+                    "total_bytes": summary.total_bytes,
+                    "corrupted_blobs": summary.corrupted_blobs
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            no_store_headers(),
+            Json(serde_json::json!({
+                "status": "unhealthy",
+                "healthy": false,
+                "error": e.to_string()
+            })),
         )
             .into_response(),
     }
