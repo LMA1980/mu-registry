@@ -123,6 +123,7 @@ impl RegistryFrontend for CargoSparseFrontend {
     fn router(&self) -> Router<AppState> {
         Router::new()
             .route("/config.json", get(config_json_handler))
+            .route("/index/config.json", get(config_json_handler))
             .route("/index/{*path}", get(get_sparse_index_handler))
             .route(
                 "/api/v1/crates/{crate}/{version}/download",
