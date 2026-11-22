@@ -5,7 +5,10 @@ use crate::storage::catalog::{
     validate_w3c_trace_id, CanaryBundleRecord, DuckDbCatalog, TokenScope,
 };
 use axum::{
-    extract::{FromRef, FromRequest, Multipart, Path, Query, State},
+    extract::{
+        multipart::{MultipartError, MultipartRejection},
+        DefaultBodyLimit, FromRef, FromRequest, Multipart, Path, Query, Request, State,
+    },
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -14,8 +17,15 @@ use axum::{
 use chrono::Utc;
 use mu_observable_ipc::TraceContext;
 use serde::Deserialize;
+use std::error::Error as StdError;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// Maximum multipart upload size accepted by `POST /api/v1/bundles/it` (`256 MiB`).
+pub const MAX_BUNDLE_UPLOAD_BODY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Maximum JSON request body size accepted by `POST /api/v1/bundles/it` (`1 MiB`).
+pub const MAX_BUNDLE_JSON_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -72,8 +82,17 @@ pub struct BundleDownloadQuery {
 }
 
 pub fn canary_router() -> Router<AppState> {
+    canary_router_with_bundle_limit(MAX_BUNDLE_UPLOAD_BODY_BYTES)
+}
+
+/// Builds the canary API router with an explicit body size limit applied strictly to
+/// `POST /api/v1/bundles/it`, leaving all other routes at Axum's default body limit.
+pub fn canary_router_with_bundle_limit(max_bundle_upload_bytes: usize) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/bundles/it", post(create_bundle_handler))
+        .route(
+            "/api/v1/bundles/it",
+            post(create_bundle_handler).layer(DefaultBodyLimit::max(max_bundle_upload_bytes)),
+        )
         .route("/api/v1/bundles/it/{id}", get(get_bundle_handler))
         .route(
             "/api/v1/cas/blobs/sha256/{digest}",
@@ -88,11 +107,196 @@ pub fn canary_router() -> Router<AppState> {
         .route("/api/v1/canary/status", get(get_canary_status_handler))
 }
 
+struct ParsedBundleFields {
+    service_name: String,
+    binary_digest: String,
+    it_archive_digest: String,
+    explicit_trace_id: Option<String>,
+}
+
+fn multipart_rejection_response(err: MultipartRejection) -> Response {
+    let status = err.status();
+    let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "payload_too_large"
+    } else {
+        "invalid_multipart"
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": code,
+            "message": err.body_text()
+        })),
+    )
+        .into_response()
+}
+
+fn multipart_error_response(err: MultipartError) -> Response {
+    let status = err.status();
+    let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "payload_too_large"
+    } else {
+        "invalid_multipart"
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": code,
+            "message": err.body_text()
+        })),
+    )
+        .into_response()
+}
+
+fn is_body_length_limit_error(err: &(dyn StdError + 'static)) -> bool {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(err);
+    while let Some(e) = current {
+        if e.to_string()
+            .to_ascii_lowercase()
+            .contains("length limit exceeded")
+        {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
+async fn parse_multipart_bundle(
+    state: &AppState,
+    req: Request,
+) -> Result<ParsedBundleFields, Box<Response>> {
+    let mut multipart = Multipart::from_request(req, &())
+        .await
+        .map_err(|e| Box::new(multipart_rejection_response(e)))?;
+
+    let mut fields = ParsedBundleFields {
+        service_name: String::new(),
+        binary_digest: String::new(),
+        it_archive_digest: String::new(),
+        explicit_trace_id: None,
+    };
+
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                let field_name = field.name().unwrap_or("").to_string();
+                match field_name.as_str() {
+                    "service_name" => {
+                        fields.service_name = field
+                            .text()
+                            .await
+                            .map_err(|e| Box::new(multipart_error_response(e)))?;
+                    }
+                    "binary" => {
+                        let bytes = field
+                            .bytes()
+                            .await
+                            .map_err(|e| Box::new(multipart_error_response(e)))?;
+                        let digest = state.cas.put_blob(&bytes).await.map_err(|e| {
+                            Box::new(
+                                (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(serde_json::json!({"error": e.to_string()})),
+                                )
+                                    .into_response(),
+                            )
+                        })?;
+                        fields.binary_digest = digest.to_string();
+                    }
+                    "it_archive" => {
+                        let bytes = field
+                            .bytes()
+                            .await
+                            .map_err(|e| Box::new(multipart_error_response(e)))?;
+                        let digest = state.cas.put_blob(&bytes).await.map_err(|e| {
+                            Box::new(
+                                (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(serde_json::json!({"error": e.to_string()})),
+                                )
+                                    .into_response(),
+                            )
+                        })?;
+                        fields.it_archive_digest = digest.to_string();
+                    }
+                    "binary_digest" => {
+                        fields.binary_digest = field
+                            .text()
+                            .await
+                            .map_err(|e| Box::new(multipart_error_response(e)))?;
+                    }
+                    "it_archive_digest" => {
+                        fields.it_archive_digest = field
+                            .text()
+                            .await
+                            .map_err(|e| Box::new(multipart_error_response(e)))?;
+                    }
+                    "trace_id" => {
+                        let t = field
+                            .text()
+                            .await
+                            .map_err(|e| Box::new(multipart_error_response(e)))?;
+                        if !t.trim().is_empty() {
+                            fields.explicit_trace_id = Some(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(Box::new(multipart_error_response(e))),
+        }
+    }
+
+    Ok(fields)
+}
+
+async fn parse_json_bundle(req: Request) -> Result<ParsedBundleFields, Box<Response>> {
+    let bytes = axum::body::to_bytes(req.into_body(), MAX_BUNDLE_JSON_BODY_BYTES)
+        .await
+        .map_err(|e| {
+            let resp = if is_body_length_limit_error(&e) {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(serde_json::json!({
+                        "error": "payload_too_large",
+                        "message": "JSON request body exceeds maximum allowed size"
+                    })),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            };
+            Box::new(resp)
+        })?;
+
+    let parsed: CreateBundleJsonRequest = serde_json::from_slice(&bytes).map_err(|e| {
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response(),
+        )
+    })?;
+
+    Ok(ParsedBundleFields {
+        service_name: parsed.service_name,
+        binary_digest: parsed.binary_digest,
+        it_archive_digest: parsed.it_archive_digest,
+        explicit_trace_id: parsed.trace_id,
+    })
+}
+
 async fn create_bundle_handler(
     State(state): State<AppState>,
     auth: AuthContext,
-    headers: HeaderMap,
-    body: axum::body::Body,
+    req: Request,
 ) -> Response {
     // Requires canary:manage or publish
     if !auth.is_authenticated() {
@@ -116,140 +320,32 @@ async fn create_bundle_handler(
             .into_response();
     }
 
-    let content_type = headers
+    let content_type = req
+        .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
+    let header_trace_id = extract_trace_id_from_headers(req.headers());
 
-    let mut service_name = String::new();
-    let mut binary_digest = String::new();
-    let mut it_archive_digest = String::new();
-    let mut explicit_trace_id: Option<String> = None;
-
-    if content_type.starts_with("multipart/form-data") {
-        let req = match axum::http::Request::builder()
-            .header(header::CONTENT_TYPE, content_type)
-            .body(body)
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response()
-            }
-        };
-
-        let mut multipart = match Multipart::from_request(req, &()).await {
-            Ok(m) => m,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response()
-            }
-        };
-
-        loop {
-            match multipart.next_field().await {
-                Ok(Some(field)) => {
-                    let field_name = field.name().unwrap_or("").to_string();
-                    if field_name == "service_name" {
-                        service_name = field.text().await.unwrap_or_default();
-                    } else if field_name == "binary" {
-                        match field.bytes().await {
-                            Ok(bytes) => match state.cas.put_blob(&bytes).await {
-                                Ok(d) => binary_digest = d.to_string(),
-                                Err(e) => {
-                                    return (
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        Json(serde_json::json!({"error": e.to_string()})),
-                                    )
-                                        .into_response()
-                                }
-                            },
-                            Err(e) => {
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(serde_json::json!({"error": e.to_string()})),
-                                )
-                                    .into_response()
-                            }
-                        }
-                    } else if field_name == "it_archive" {
-                        match field.bytes().await {
-                            Ok(bytes) => match state.cas.put_blob(&bytes).await {
-                                Ok(d) => it_archive_digest = d.to_string(),
-                                Err(e) => {
-                                    return (
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        Json(serde_json::json!({"error": e.to_string()})),
-                                    )
-                                        .into_response()
-                                }
-                            },
-                            Err(e) => {
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(serde_json::json!({"error": e.to_string()})),
-                                )
-                                    .into_response()
-                            }
-                        }
-                    } else if field_name == "binary_digest" {
-                        binary_digest = field.text().await.unwrap_or_default();
-                    } else if field_name == "it_archive_digest" {
-                        it_archive_digest = field.text().await.unwrap_or_default();
-                    } else if field_name == "trace_id" {
-                        let t = field.text().await.unwrap_or_default();
-                        if !t.trim().is_empty() {
-                            explicit_trace_id = Some(t);
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": e.to_string()})),
-                    )
-                        .into_response()
-                }
-            }
+    let parsed = if content_type
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data")
+    {
+        match parse_multipart_bundle(&state, req).await {
+            Ok(fields) => fields,
+            Err(resp) => return *resp,
         }
     } else {
-        // Assume JSON
-        let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
-            Ok(b) => b,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response()
-            }
-        };
-        let parsed: CreateBundleJsonRequest = match serde_json::from_slice(&bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response()
-            }
-        };
-        service_name = parsed.service_name;
-        binary_digest = parsed.binary_digest;
-        it_archive_digest = parsed.it_archive_digest;
-        explicit_trace_id = parsed.trace_id;
-    }
+        match parse_json_bundle(req).await {
+            Ok(fields) => fields,
+            Err(resp) => return *resp,
+        }
+    };
 
-    if service_name.trim().is_empty()
-        || binary_digest.trim().is_empty()
-        || it_archive_digest.trim().is_empty()
+    if parsed.service_name.trim().is_empty()
+        || parsed.binary_digest.trim().is_empty()
+        || parsed.it_archive_digest.trim().is_empty()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -261,7 +357,7 @@ async fn create_bundle_handler(
             .into_response();
     }
 
-    let resolved_trace_id = match explicit_trace_id {
+    let resolved_trace_id = match parsed.explicit_trace_id {
         Some(raw) => match validate_w3c_trace_id(&raw) {
             Ok(valid) => Some(valid),
             Err(e) => {
@@ -275,16 +371,16 @@ async fn create_bundle_handler(
                     .into_response()
             }
         },
-        None => extract_trace_id_from_headers(&headers),
+        None => header_trace_id,
     };
 
     let bundle_id = format!("bundle-{}", Uuid::new_v4());
     let now = Utc::now().timestamp_millis();
     let bundle = CanaryBundleRecord {
         bundle_id: bundle_id.clone(),
-        service_name: service_name.clone(),
-        binary_digest: binary_digest.clone(),
-        it_archive_digest: it_archive_digest.clone(),
+        service_name: parsed.service_name,
+        binary_digest: parsed.binary_digest,
+        it_archive_digest: parsed.it_archive_digest,
         status: "testing".to_string(),
         created_at: now,
         updated_at: now,
