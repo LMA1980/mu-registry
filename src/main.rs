@@ -1,7 +1,10 @@
 use axum::Router;
 use mu_registry::{
     api::build_app_router,
-    server::{build_listener_tls_acceptor, serve_router_with_listener},
+    server::{
+        build_listener_tls_acceptor, serve_router_with_listener, spawn_periodic_cas_scrub,
+        DEFAULT_CAS_SCRUB_INTERVAL,
+    },
     AppConfig, AppState, CasStore, DuckDbCatalog,
 };
 use std::future::Future;
@@ -35,7 +38,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = build_app_router(state);
     let listener = TcpListener::bind(&config.listen_addr).await?;
-    serve_with_config(listener, app, &config, shutdown_signal()).await?;
+    let (scrub_shutdown_tx, scrub_shutdown_rx) = tokio::sync::watch::channel(false);
+    let scrub_handle =
+        spawn_periodic_cas_scrub(cas.clone(), DEFAULT_CAS_SCRUB_INTERVAL, scrub_shutdown_rx);
+
+    let serve_res = serve_with_config(listener, app, &config, shutdown_signal()).await;
+    let _ = scrub_shutdown_tx.send(true);
+    scrub_handle.abort();
+    let _ = scrub_handle.await;
+    serve_res?;
 
     info!("mu-registry daemon stopped cleanly.");
     Ok(())

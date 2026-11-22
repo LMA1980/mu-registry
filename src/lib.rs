@@ -20,15 +20,15 @@ pub use frontend::cargo::{cargo_index_relative_path, encode_publish_frame, Cargo
 pub use frontend::{Maven2Frontend, NuGetV3Frontend, RegistryFrontend};
 pub use server::{
     build_listener_tls_acceptor, extract_verified_client_san, prepare_mtls_request,
-    serve_router_with_listener,
+    serve_router_with_listener, spawn_periodic_cas_scrub, DEFAULT_CAS_SCRUB_INTERVAL,
 };
 pub use storage::{
     list_public_packages, sanitize_node_alias, sanitize_public_text, validate_w3c_trace_id,
-    ApiTokenRecord, CanaryBundleRecord, CanaryStatusSummary, CasStorage, CasStorageHealthSummary,
-    CasStorageSummary, CasStore, Catalog, CatalogError, CatalogOverviewCounts, CrateDepRecord,
-    CrateRecord, CrateVersionRecord, DuckDbCatalog, PublicCrateDetail, PublicCrateVersionDetail,
-    PublicPackageSummary, RegistrySseEvent, Sha256Digest, StorageError, TaintRecord,
-    TaintedDigestRecord, TokenScope,
+    ApiTokenRecord, CanaryBundleRecord, CanaryStatusSummary, CasScrubSnapshot, CasStorage,
+    CasStorageHealthSummary, CasStorageSummary, CasStore, Catalog, CatalogError,
+    CatalogOverviewCounts, CrateDepRecord, CrateRecord, CrateVersionRecord, DuckDbCatalog,
+    PublicCrateDetail, PublicCrateVersionDetail, PublicPackageSummary, RegistrySseEvent,
+    Sha256Digest, StorageError, TaintRecord, TaintedDigestRecord, TokenScope,
 };
 pub use telemetry::{
     classify_registry_operation, registry_telemetry_middleware, MuObserveRegistrySink,

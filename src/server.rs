@@ -2,6 +2,7 @@ use crate::auth::{
     build_tls_server_config, extract_primary_cert_san, AuthError, VerifiedClientSan,
 };
 use crate::config::{parse_env_bool_first, AppConfig};
+use crate::storage::CasStore;
 use axum::Router;
 use hyper::body::{Body as HttpBody, Incoming};
 use hyper::service::Service as HyperService;
@@ -12,14 +13,67 @@ use hyper_util::service::TowerToHyperService;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tower::Service as TowerService;
 use tracing::{debug, info, warn};
+
+/// Default interval between background cryptographic CAS scrubs (5 minutes).
+pub const DEFAULT_CAS_SCRUB_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Spawns a non-blocking background periodic CAS scrub task that performs an initial
+/// full cryptographic SHA-256 scrub after startup and repeats every `interval` until
+/// `shutdown_rx` signals shutdown.
+pub fn spawn_periodic_cas_scrub(
+    cas: Arc<CasStore>,
+    interval: Duration,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = if interval.is_zero() {
+            DEFAULT_CAS_SCRUB_INTERVAL
+        } else {
+            interval
+        };
+
+        loop {
+            match cas.storage_health_summary().await {
+                Ok(summary) if summary.corrupted_blobs > 0 => {
+                    warn!(
+                        total_blobs = summary.total_blobs,
+                        total_bytes = summary.total_bytes,
+                        corrupted_blobs = summary.corrupted_blobs,
+                        "Periodic CAS scrub detected corrupted blobs"
+                    );
+                }
+                Ok(summary) => {
+                    debug!(
+                        total_blobs = summary.total_blobs,
+                        total_bytes = summary.total_bytes,
+                        "Periodic CAS scrub completed with zero corrupted blobs"
+                    );
+                }
+                Err(err) => {
+                    warn!(error = %err, "Periodic CAS scrub failed");
+                }
+            }
+
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                () = tokio::time::sleep(interval) => {}
+            }
+        }
+    })
+}
 
 /// Builds a [`TlsAcceptor`] when CA, server certificate, and server key files all exist.
 ///
@@ -291,5 +345,41 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, AuthError::Tls(_)));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_spawn_periodic_cas_scrub_updates_cached_snapshot_and_shuts_down() {
+        let tmp = tempdir().unwrap();
+        let cas = Arc::new(CasStore::new(tmp.path()));
+        cas.init().await.unwrap();
+        let digest = cas.put_blob(b"periodic-scrub-blob").await.unwrap();
+        tokio::fs::write(cas.blob_path(digest.as_str()).unwrap(), b"corrupt-payload")
+            .await
+            .unwrap();
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn_periodic_cas_scrub(cas.clone(), Duration::from_secs(60), shutdown_rx);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while cas.cached_scrub_snapshot().is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let snapshot = cas
+            .cached_scrub_snapshot()
+            .expect("background scrub must populate cached snapshot");
+        assert_eq!(snapshot.corrupted_blobs, 1);
+        assert!(snapshot.last_scrub_epoch_ms > 0);
+
+        let fast = cas.fast_health_summary().await.unwrap();
+        assert_eq!(fast.corrupted_blobs, 1);
+        assert!(!fast.healthy);
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("background scrub task must exit cleanly on shutdown")
+            .unwrap();
     }
 }
