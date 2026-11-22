@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
@@ -41,6 +41,14 @@ pub struct CasStorageHealthSummary {
 }
 
 pub type CasStorageSummary = CasStorageHealthSummary;
+
+/// Cached integrity metrics from the most recent full cryptographic CAS scrub
+/// or read-path corruption detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CasScrubSnapshot {
+    pub corrupted_blobs: u64,
+    pub last_scrub_epoch_ms: i64,
+}
 
 /// A validated 64-character lowercase hexadecimal SHA-256 digest string.
 #[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -130,6 +138,7 @@ impl TryFrom<String> for Sha256Digest {
 pub struct CasStore {
     root_dir: PathBuf,
     dedup_savings_bytes: Arc<AtomicU64>,
+    scrub_snapshot: Arc<RwLock<Option<CasScrubSnapshot>>>,
 }
 
 pub type CasStorage = CasStore;
@@ -139,7 +148,39 @@ impl CasStore {
         Self {
             root_dir: root_dir.into(),
             dedup_savings_bytes: Arc::new(AtomicU64::new(0)),
+            scrub_snapshot: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Returns the most recently cached cryptographic scrub snapshot, if available.
+    pub fn cached_scrub_snapshot(&self) -> Option<CasScrubSnapshot> {
+        *self
+            .scrub_snapshot
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record_scrub_snapshot(&self, corrupted_blobs: u64, last_scrub_epoch_ms: i64) {
+        let mut guard = self
+            .scrub_snapshot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(CasScrubSnapshot {
+            corrupted_blobs,
+            last_scrub_epoch_ms,
+        });
+    }
+
+    fn record_detected_corruption(&self) {
+        let mut guard = self
+            .scrub_snapshot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let corrupted_blobs = guard.map_or(1, |snap| snap.corrupted_blobs.max(1));
+        *guard = Some(CasScrubSnapshot {
+            corrupted_blobs,
+            last_scrub_epoch_ms: Utc::now().timestamp_millis(),
+        });
     }
 
     pub fn default_path() -> PathBuf {
@@ -186,6 +227,7 @@ impl CasStore {
         let content = tokio::fs::read(&path).await?;
         let computed = Sha256Digest::from_bytes(&content);
         if computed.as_str() != digest {
+            self.record_detected_corruption();
             return Err(StorageError::CorruptBlob(format!(
                 "Digest mismatch for {}: expected {}, computed {}",
                 path.display(),
@@ -276,8 +318,12 @@ impl CasStore {
                     match tokio::fs::read(blob_entry.path()).await {
                         Ok(bytes) => {
                             total_bytes += bytes.len() as u64;
-                            let computed = Sha256Digest::from_bytes(&bytes);
-                            if computed.as_str() != file_name {
+                            let matches_digest = tokio::task::spawn_blocking(move || {
+                                Sha256Digest::from_bytes(&bytes).as_str() == file_name
+                            })
+                            .await
+                            .unwrap_or(false);
+                            if !matches_digest {
                                 corrupted_blobs += 1;
                             }
                         }
@@ -295,13 +341,72 @@ impl CasStore {
             .saturating_mul(10_000)
             .checked_div(logical_bytes)
             .unwrap_or(0) as u32;
+        let last_scrub_epoch_ms = Utc::now().timestamp_millis();
+        self.record_scrub_snapshot(corrupted_blobs, last_scrub_epoch_ms);
 
         Ok(CasStorageHealthSummary {
             total_blobs,
             total_bytes,
             dedup_ratio_bps,
             dedup_savings_bytes,
-            last_scrub_epoch_ms: Utc::now().timestamp_millis(),
+            last_scrub_epoch_ms,
+            corrupted_blobs,
+            healthy: corrupted_blobs == 0,
+        })
+    }
+
+    /// Computes aggregate CAS capacity and health telemetry using directory metadata only
+    /// (`entry.metadata().await?.len()`, zero blob reads, and zero SHA-256 hashing),
+    /// merged with the most recent cached background scrub snapshot. Returns zero host
+    /// filesystem paths.
+    pub async fn fast_health_summary(&self) -> Result<CasStorageHealthSummary, StorageError> {
+        let blobs_root = self.blobs_dir();
+        let mut total_blobs = 0u64;
+        let mut total_bytes = 0u64;
+
+        if tokio::fs::try_exists(&blobs_root).await.unwrap_or(false) {
+            let mut prefix_dir = tokio::fs::read_dir(&blobs_root).await?;
+            while let Some(prefix_entry) = prefix_dir.next_entry().await? {
+                let file_type = prefix_entry.file_type().await?;
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let mut shard_dir = tokio::fs::read_dir(prefix_entry.path()).await?;
+                while let Some(blob_entry) = shard_dir.next_entry().await? {
+                    let blob_type = blob_entry.file_type().await?;
+                    if !blob_type.is_file() {
+                        continue;
+                    }
+                    match blob_entry.metadata().await {
+                        Ok(meta) => {
+                            total_blobs += 1;
+                            total_bytes = total_bytes.saturating_add(meta.len());
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(err) => return Err(StorageError::Io(err)),
+                    }
+                }
+            }
+        }
+
+        let dedup_savings_bytes = self.dedup_savings_bytes.load(Ordering::Relaxed);
+        let logical_bytes = total_bytes.saturating_add(dedup_savings_bytes);
+        let dedup_ratio_bps = dedup_savings_bytes
+            .saturating_mul(10_000)
+            .checked_div(logical_bytes)
+            .unwrap_or(0) as u32;
+
+        let (corrupted_blobs, last_scrub_epoch_ms) = match self.cached_scrub_snapshot() {
+            Some(snapshot) => (snapshot.corrupted_blobs, snapshot.last_scrub_epoch_ms),
+            None => (0, Utc::now().timestamp_millis()),
+        };
+
+        Ok(CasStorageHealthSummary {
+            total_blobs,
+            total_bytes,
+            dedup_ratio_bps,
+            dedup_savings_bytes,
+            last_scrub_epoch_ms,
             corrupted_blobs,
             healthy: corrupted_blobs == 0,
         })
@@ -484,5 +589,122 @@ mod tests {
         assert_eq!(corrupt_summary.total_blobs, 2);
         assert_eq!(corrupt_summary.corrupted_blobs, 1);
         assert!(!corrupt_summary.healthy);
+    }
+
+    #[test]
+    fn test_cached_scrub_snapshot_and_corruption_recording() {
+        let store = CasStore::new("/var/lib/mu-registry");
+        let cloned = store.clone();
+        assert!(store.cached_scrub_snapshot().is_none());
+
+        store.record_scrub_snapshot(0, 1_700_000_000_000);
+        assert_eq!(
+            cloned.cached_scrub_snapshot(),
+            Some(CasScrubSnapshot {
+                corrupted_blobs: 0,
+                last_scrub_epoch_ms: 1_700_000_000_000,
+            })
+        );
+
+        // Read-path corruption detection marks unhealthy without inflating above 1 on repeats
+        cloned.record_detected_corruption();
+        let after_first = store.cached_scrub_snapshot().unwrap();
+        assert_eq!(after_first.corrupted_blobs, 1);
+        assert!(after_first.last_scrub_epoch_ms > 0);
+
+        store.record_detected_corruption();
+        assert_eq!(store.cached_scrub_snapshot().unwrap().corrupted_blobs, 1);
+
+        // A subsequent clean full scrub resets corrupted_blobs back to 0
+        store.record_scrub_snapshot(0, 1_700_000_005_000);
+        assert_eq!(
+            cloned.cached_scrub_snapshot(),
+            Some(CasScrubSnapshot {
+                corrupted_blobs: 0,
+                last_scrub_epoch_ms: 1_700_000_005_000,
+            })
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_fast_health_summary_metadata_only_latency_and_scrub_propagation() {
+        let temp_dir = tempdir().unwrap();
+        let store = CasStore::new(temp_dir.path());
+        store.init().await.unwrap();
+
+        let blob_a = b"fast-summary-alpha-payload";
+        let blob_large = vec![0x5Au8; 4 * 1024 * 1024];
+        let digest_a = store.put_blob(blob_a).await.unwrap();
+        let _digest_large = store.put_blob(&blob_large).await.unwrap();
+        // Record deduplication savings on duplicate write
+        let _dup = store.put_blob(blob_a).await.unwrap();
+
+        // Tamper with blob_a bytes (preserving length) BEFORE any scrub runs
+        let path_a = store.blob_path(digest_a.as_str()).unwrap();
+        let tampered = vec![b'X'; blob_a.len()];
+        tokio::fs::write(&path_a, &tampered).await.unwrap();
+
+        // fast_health_summary() uses metadata only (zero blob reads / zero SHA-256 hashing)
+        let started = std::time::Instant::now();
+        let fast_before_scrub = store.fast_health_summary().await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "fast_health_summary took {:?}, expected < 50ms",
+            elapsed
+        );
+        assert_eq!(fast_before_scrub.total_blobs, 2);
+        assert_eq!(
+            fast_before_scrub.total_bytes,
+            (blob_a.len() + blob_large.len()) as u64
+        );
+        assert_eq!(fast_before_scrub.dedup_savings_bytes, blob_a.len() as u64);
+        assert_eq!(fast_before_scrub.corrupted_blobs, 0);
+        assert!(fast_before_scrub.healthy);
+        assert!(fast_before_scrub.last_scrub_epoch_ms > 0);
+
+        // Full cryptographic scrub detects corruption and populates the cached snapshot
+        let scrubbed = store.storage_health_summary().await.unwrap();
+        assert_eq!(scrubbed.corrupted_blobs, 1);
+        assert!(!scrubbed.healthy);
+
+        // Subsequent fast_health_summary() propagates cached corruption in < 50ms
+        let started_after = std::time::Instant::now();
+        let fast_after_scrub = store.fast_health_summary().await.unwrap();
+        let elapsed_after = started_after.elapsed();
+        assert!(
+            elapsed_after < std::time::Duration::from_millis(50),
+            "fast_health_summary after scrub took {:?}, expected < 50ms",
+            elapsed_after
+        );
+        assert_eq!(fast_after_scrub.total_blobs, 2);
+        assert_eq!(
+            fast_after_scrub.total_bytes,
+            (blob_a.len() + blob_large.len()) as u64
+        );
+        assert_eq!(fast_after_scrub.corrupted_blobs, 1);
+        assert!(!fast_after_scrub.healthy);
+        assert_eq!(
+            fast_after_scrub.last_scrub_epoch_ms,
+            scrubbed.last_scrub_epoch_ms
+        );
+
+        // Read-path corruption detection in get_blob() immediately marks a fresh store unhealthy
+        let temp_dir_read = tempdir().unwrap();
+        let read_store = CasStore::new(temp_dir_read.path());
+        read_store.init().await.unwrap();
+        let d_read = read_store.put_blob(b"intact-before-tamper").await.unwrap();
+        assert!(read_store.fast_health_summary().await.unwrap().healthy);
+        tokio::fs::write(read_store.blob_path(d_read.as_str()).unwrap(), b"corrupted")
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_store.get_blob(d_read.as_str()).await,
+            Err(StorageError::CorruptBlob(_))
+        ));
+        let after_read_err = read_store.fast_health_summary().await.unwrap();
+        assert_eq!(after_read_err.corrupted_blobs, 1);
+        assert!(!after_read_err.healthy);
     }
 }

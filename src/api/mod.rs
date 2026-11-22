@@ -283,7 +283,7 @@ async fn list_registry_taints_handler(State(state): State<AppState>) -> Response
 }
 
 async fn registry_health_handler(State(state): State<AppState>) -> Response {
-    match state.cas.storage_health_summary().await {
+    match state.cas.fast_health_summary().await {
         Ok(summary) => {
             let status_code = if summary.healthy {
                 StatusCode::OK
@@ -320,7 +320,7 @@ async fn registry_health_handler(State(state): State<AppState>) -> Response {
 }
 
 async fn get_cas_status_handler(State(state): State<AppState>) -> Response {
-    match state.cas.storage_health_summary().await {
+    match state.cas.fast_health_summary().await {
         Ok(summary) => (StatusCode::OK, no_store_headers(), Json(summary)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -332,7 +332,7 @@ async fn get_cas_status_handler(State(state): State<AppState>) -> Response {
 }
 
 async fn get_registry_overview_handler(State(state): State<AppState>) -> Response {
-    let cas_summary = match state.cas.storage_summary().await {
+    let cas_summary = match state.cas.fast_health_summary().await {
         Ok(s) => s,
         Err(e) => {
             return (

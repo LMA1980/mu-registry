@@ -2,7 +2,8 @@ pub mod cas;
 pub mod catalog;
 
 pub use cas::{
-    CasStorage, CasStorageHealthSummary, CasStorageSummary, CasStore, Sha256Digest, StorageError,
+    CasScrubSnapshot, CasStorage, CasStorageHealthSummary, CasStorageSummary, CasStore,
+    Sha256Digest, StorageError,
 };
 pub use catalog::{
     sanitize_node_alias, sanitize_public_text, validate_w3c_trace_id, ApiTokenRecord,

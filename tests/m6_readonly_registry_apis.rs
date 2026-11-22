@@ -538,3 +538,104 @@ async fn test_m6_cas_status_overview_and_sse_events() {
         .unwrap();
     assert!(ctype.starts_with("text/event-stream"));
 }
+
+#[tokio::test]
+async fn test_m6_health_endpoint_fast_summary_and_503_on_cached_corruption() {
+    let tmp = tempdir().unwrap();
+    let config = Arc::new(AppConfig::new(
+        tmp.path(),
+        "https://registry.example.test:8444",
+    ));
+    let cas = Arc::new(CasStore::new(&config.root_dir));
+    cas.init().await.unwrap();
+    let catalog = DuckDbCatalog::in_memory().unwrap();
+
+    let state = AppState {
+        config: config.clone(),
+        cas: cas.clone(),
+        catalog,
+    };
+    let app = build_app_router(state);
+
+    let payload = b"health-endpoint-fast-cas-blob";
+    let digest = cas.put_blob(payload).await.unwrap();
+
+    // Tamper blob bytes without running a scrub yet: /health must stay fast and metadata-only
+    tokio::fs::write(
+        cas.blob_path(digest.as_str()).unwrap(),
+        vec![b'Z'; payload.len()],
+    )
+    .await
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let ok_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(50),
+        "GET /health exceeded 50ms latency budget"
+    );
+    assert_eq!(ok_res.status(), StatusCode::OK);
+    let ok_body = ok_res.into_body().collect().await.unwrap().to_bytes();
+    let ok_json: serde_json::Value = serde_json::from_slice(&ok_body).unwrap();
+    assert_eq!(ok_json["status"], "ok");
+    assert_eq!(ok_json["healthy"], true);
+    assert_eq!(ok_json["total_blobs"], 1);
+    assert_eq!(ok_json["total_bytes"], payload.len() as u64);
+    assert_eq!(ok_json["corrupted_blobs"], 0);
+
+    // Run full cryptographic scrub -> cached corruption propagates to 503 on /health
+    let scrubbed = cas.storage_health_summary().await.unwrap();
+    assert_eq!(scrubbed.corrupted_blobs, 1);
+    assert!(!scrubbed.healthy);
+
+    for uri in ["/health", "/api/health", "/api/v1/cas/health"] {
+        let degraded_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(degraded_res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = degraded_res.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(json["healthy"], false);
+        assert_eq!(json["corrupted_blobs"], 1);
+    }
+
+    let status_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/cas/status")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status_res.status(), StatusCode::OK);
+    let status_body = status_res.into_body().collect().await.unwrap().to_bytes();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+    assert_eq!(status_json["healthy"], false);
+    assert_eq!(status_json["corrupted_blobs"], 1);
+    assert_eq!(
+        status_json["last_scrub_epoch_ms"],
+        scrubbed.last_scrub_epoch_ms
+    );
+}
